@@ -2,6 +2,8 @@ $CountyUrl = 'https://www.hostelworld.com/hostels/oceania/new-zealand/'
 $currency = 'NZD'
 $MaxThreads = 8  # Add this near the top of the script
 
+Write-Host "Using public ip: $(Invoke-RestMethod -Uri 'https://api.ipify.org?format=text')"
+
 # prepare RAW-Run folder and write marker file
 $workspace = (Get-Location)
 $rawRunRel   = "raw/"
@@ -239,9 +241,7 @@ $results = @(foreach($cityUrl in $cityUrls)
 Write-Host "Found $($results.Count) unique city ids"
 
 # foreach city id get property ids
-$allPropertyIds = @()
-
-foreach ($cityId in $results)
+$allPropertyIds = @(foreach ($cityId in $results)
 {
     $range = @(1, 5, 14, 30, 45, 60) # check these days for properties to find more properties
     $range | ForEach-Object -ThrottleLimit $MaxThreads -Parallel {
@@ -317,11 +317,8 @@ foreach ($cityId in $results)
             Write-Host "    ! Error fetching properties for city $using:cityId on date $($dateStart.ToString('yyyy-MM-dd'))"
         }
     }
-}
+}) | Select-Object -Unique
 
-# After parallel execution, update $allPropertyIds
-$allPropertyIds += $sync.PropertyIds
-$allPropertyIds = $allPropertyIds | Select-Object -Unique
 Write-Host "Found $($allPropertyIds.Count) unique property ids"
 
 # crawl room data for all property ids the next 90 days
