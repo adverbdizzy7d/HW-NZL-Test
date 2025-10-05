@@ -148,4 +148,4 @@ jobs:
           $pr_body  = "Adds new RAW JSONs only (no CSVs). Partial + sparse clone keeps PR minimal."
           $pr_url = gh pr create --base raw-data --head $head --title $pr_title --body $pr_body
           # Serverseitiges Auto-Merge → reduziert 504-Risiko
-          gh pr merge $pr_url --merge --auto --delete-branch
+          gh pr merge $pr_url --merge --admin --delete-branch
