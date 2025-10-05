@@ -1,5 +1,6 @@
 $CountyUrl = 'https://www.hostelworld.com/hostels/oceania/new-zealand/'
 $currency = 'NZD'
+$MaxThreads = 8  # Add this near the top of the script
 
 # prepare RAW-Run folder and write marker file
 $workspace = (Get-Location)
@@ -239,26 +240,87 @@ Write-Host "Found $($results.Count) unique city ids"
 
 # foreach city id get property ids
 $allPropertyIds = @()
+
 foreach ($cityId in $results)
 {
-    $range = @(1, 5, 14, 30) # check these days for properties to find more properties
-    foreach($date in $range)
-    {
-        $dateStart = (Get-Date).AddDays($date)
-        Write-Host "Crawling city id $cityId for date $($dateStart.ToString("yyyy-MM-dd"))"
-        try
+    $range = @(1, 5, 14, 30, 45, 60) # check these days for properties to find more properties
+    $range | ForEach-Object -ThrottleLimit $MaxThreads -Parallel {
+
+        function Get-HostelworldProperties
         {
-            $propertyResult = Get-HostelworldProperties -cityId $cityId -currency $currency -dateStart $dateStart -numNights 1 -guests 1
+        [CmdletBinding()]
+        param (
+            [Parameter(Mandatory=$true)]
+            [String]
+            $cityId,
+
+            [Parameter()]
+            [String]
+            $currency = "EUR",
+
+            [Parameter(Mandatory=$true)]
+            [DateTime]
+            $dateStart,
+
+            [Parameter()]
+            [Int]
+            $numNights = 5,
+
+            [Parameter()]
+            [Int]
+            $guests = 1,
+
+            [Parameter()]
+            [Int]
+            $perPage = 1000,
+
+            [Parameter()]
+            [Int]
+            $showRooms = 1,
+
+            [Parameter()]
+            [Int]
+            $propertyNumImages = 30
+        )
+
+        $dateStartString = $dateStart.ToString("yyyy-MM-dd")
+
+        $restResult = Invoke-RestMethod -UseBasicParsing -Uri "https://prod.apigee.hostelworld.com/legacy-hwapi-service/2.2/cities/$cityId/properties/?currency=$currency&application=app&date-start=$dateStartString&num-nights=$numNights&guests=$guests&per-page=$perPage&show-rooms=$showRooms&property-num-images=$propertyNumImages&v=variation" `
+        -UserAgent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:142.0) Gecko/20100101 Firefox/142.0" `
+        -Headers @{
+        "Accept" = "application/json, text/plain, */*"
+            "Accept-Language" = "en"
+            "Accept-Encoding" = "gzip, deflate, br, zstd"
+            "Sec-GPC" = "1"
+            "Sec-Fetch-Dest" = "empty"
+            "Sec-Fetch-Mode" = "cors"
+            "Sec-Fetch-Site" = "same-site"
+            "Pragma" = "no-cache"
+            "Cache-Control" = "no-cache"
+            "TE" = "trailers"
         }
-        catch
-        {
-            Write-Host "    ! Error fetching properties for city $cityId on date $($dateStart.ToString("yyyy-MM-dd"))"
-            continue
+
+        return $restResult
         }
-        $propertyIds = $propertyResult.properties.id
-        $allPropertyIds += $propertyIds
+
+        $dateStart = (Get-Date).AddDays($_)
+        Write-Host "Crawling city id $using:cityId for date $($dateStart.ToString('yyyy-MM-dd'))"
+        try {
+            $propertyResult = Get-HostelworldProperties -cityId $using:cityId -currency $using:currency -dateStart $dateStart -numNights 1 -guests 1
+            $propertyIds = $propertyResult.properties.id
+            $propertyIds = $propertyIds | Select-Object -Unique
+            $propertyIds
+            # Thread-safe add to shared collection
+            #$propertyIds | ForEach-Object { $using:sync.PropertyIds.Add($_) | Out-Null }
+        }
+        catch {
+            Write-Host "    ! Error fetching properties for city $using:cityId on date $($dateStart.ToString('yyyy-MM-dd'))"
+        }
     }
 }
+
+# After parallel execution, update $allPropertyIds
+$allPropertyIds += $sync.PropertyIds
 $allPropertyIds = $allPropertyIds | Select-Object -Unique
 Write-Host "Found $($allPropertyIds.Count) unique property ids"
 
@@ -287,9 +349,64 @@ foreach ($propertyId in $allPropertyIds)
         Write-Host "    ! Error fetching property data for property $propertyId"
     }
     
-    $range = 0..30 # check the next 30 days for availability
-    foreach($date in $range)
-    {
+    $range = 0..60 # check the next 60 days for availability
+    $range | ForEach-Object -ThrottleLimit $MaxThreads -Parallel {
+        $date = $_
+        $propertyId = $using:propertyId
+        $crawledTime = $using:crawledTime
+        $rawRunRoot = $using:rawRunRoot
+        $workspace = $using:workspace
+        $currency = $using:currency
+        
+        function Get-HostelworldPropertyAvailability
+        {
+        [CmdletBinding()]
+        param (
+            [Parameter(Mandatory=$true)]
+            [String]
+            $propertyId,
+
+            [Parameter(Mandatory=$true)]
+            [DateTime]
+            $dateStart,
+
+            [Parameter()]
+            [Int]
+            $numNights = 5,
+
+            [Parameter()]
+            [Int]
+            $guests = 1,
+
+            [Parameter()]
+            [Bool]
+            $showRateRestrictions = $true,
+
+            [Parameter()]
+            [String]
+            $application = "web"
+        )
+
+        $dateStartString = $dateStart.ToString("yyyy-MM-dd")
+        $showRateRestrictionsString = $showRateRestrictions.ToString().ToLower()
+
+        $restResult = Invoke-RestMethod -UseBasicParsing -Uri "https://prod.apigee.hostelworld.com/legacy-hwapi-service/2.2/properties/$propertyId/availability/?guests=$guests&num-nights=$numNights&date-start=$dateStartString&show-rate-restrictions=$showRateRestrictionsString&application=$application" `
+        -UserAgent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:142.0) Gecko/20100101 Firefox/142.0" `
+        -Headers @{
+        "Accept" = "application/json, text/plain, */*"
+            "Accept-Language" = "en"
+            "Accept-Encoding" = "gzip, deflate, br, zstd"
+            "Sec-GPC" = "1"
+            "Sec-Fetch-Dest" = "empty"
+            "Sec-Fetch-Mode" = "cors"
+            "Sec-Fetch-Site" = "same-site"
+            "Pragma" = "no-cache"
+            "Cache-Control" = "no-cache"
+            "TE" = "trailers"
+        }
+
+        return $restResult
+        }
         $dateStart = (Get-Date).AddDays($date)
         Write-Host "  - Crawling date $($dateStart.ToString("yyyy-MM-dd"))"
         try 
@@ -329,7 +446,8 @@ foreach ($propertyId in $allPropertyIds)
                         crawledAt     = ([DateTimeOffset]$crawledTime).ToUnixTimeSeconds()
                         urlPart       = $urlPart
                     }
-                    $data2store | Export-Csv -Path $priceHistoryFile -NoTypeInformation -Append
+                    $data2store
+                    #$data2store | Export-Csv -Path $priceHistoryFile -NoTypeInformation -Append
                 }
             }
         }
