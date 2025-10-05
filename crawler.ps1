@@ -350,6 +350,8 @@ foreach ($propertyId in $allPropertyIds)
     }
     
     $range = 0..60 # check the next 60 days for availability
+    $priceHistoryFile = Join-Path -Path $workspace -ChildPath ("{0}_prices_history.csv" -f $propertyId)
+
     $range | ForEach-Object -ThrottleLimit $MaxThreads -Parallel {
         $date = $_
         $propertyId = $using:propertyId
@@ -434,7 +436,6 @@ foreach ($propertyId in $allPropertyIds)
         if ($availability -and $availability.rooms -and $availability.rooms.dorms) {
             foreach($dorm in $availability.rooms.dorms)
             {
-                $priceHistoryFile = Join-Path -Path $workspace -ChildPath ("{0}_prices_history.csv" -f $propertyId)
                 foreach($priceBreakdown in $dorm.priceBreakdown)
                 {
                     $data2store = [PSCustomObject]@{
@@ -451,7 +452,7 @@ foreach ($propertyId in $allPropertyIds)
                 }
             }
         }
-    }
+    } | Export-Csv -Path $priceHistoryFile -NoTypeInformation -Append
 }
 
 Write-Host "Crawling finished."
