@@ -137,7 +137,7 @@ jobs:
           "branch_created=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "branch_name=$branch" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Create PR for RAW data (base: raw-data) & enable auto-merge
+      - name: Create PR for RAW data (base raw-data) & enable auto-merge
         if: success() && steps.push_raw.outputs.branch_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
