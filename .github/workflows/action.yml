@@ -15,7 +15,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout (main)
         uses: actions/checkout@v4
         with:
           persist-credentials: true
@@ -37,7 +37,6 @@ jobs:
           # Stage all changes first, then unstage raw/
           git add -A
           git reset HEAD -- raw/
-          
 
           # Only commit if there are changes (e.g. CSVs)
           git diff --cached --quiet
@@ -49,67 +48,104 @@ jobs:
             git push origin HEAD:${{ github.ref_name }}
           }
 
-      - name: Create & push RAW branch (JSONs per run)
-        id: create_raw_branch
+      # ================== PR gegen raw-data NUR mit RAW-Dateien ==================
+
+      - name: Prepare identifiers & sparse list (RAW only)
+        id: prep
         shell: pwsh
         run: |
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config user.name  "github-actions[bot]"
+          $ts = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmssZ")
+          "ts=$ts" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          $workspace = (Get-Location)
-          $rawRunRoot  = Join-Path $workspace 'raw'
-          if (-not (Test-Path $rawRunRoot)) {
-            Write-Error "RAW run folder '$rawRunRoot' does not exist."
-            exit 1
+          $ws = $env:GITHUB_WORKSPACE
+          $sparseFile = Join-Path $ws 'sparse.txt'
+          if (Test-Path $sparseFile) { Remove-Item $sparseFile -Force }
+
+          # Alle NEU erzeugten RAW-Dateien dieses Runs
+          $rawRoot = Join-Path $ws 'raw'
+          if (Test-Path $rawRoot) {
+            Get-ChildItem -Path $rawRoot -Recurse -File | ForEach-Object {
+              $rel = [IO.Path]::GetRelativePath($ws, $_.FullName).Replace('\','/')
+              "/$rel" | Out-File -FilePath $sparseFile -Append -Encoding utf8
+            }
           }
 
-          $ts = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmssZ")
-          $rawBranch = "raw/${{ github.run_id }}-$ts"
+          $count = (Test-Path $sparseFile) ? ((Get-Content $sparseFile).Count) : 0
+          "paths_count=$count" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          Write-Host "Creating branch '$rawBranch' for RAW JSONs..."
-          # Branch off from the current HEAD
-          git switch -c $rawBranch
+      - name: Skip PR if nothing to push
+        if: ${{ steps.prep.outputs.paths_count == '0' }}
+        run: echo "No RAW changes for raw-data PR."
 
-          # Only stage the current RAW run folder
-          git add 'raw'
+      - name: Partial + Sparse clone raw-data branch (no blobs)
+        if: ${{ steps.prep.outputs.paths_count != '0' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $url  = "https://x-access-token:$env:GH_TOKEN@github.com/$repo.git"
 
-          # Only push branch if there is actually new RAW data
+          git clone --filter=blob:none --no-checkout --depth=1 --branch raw-data "$url" raw-data
+
+          git -C raw-data config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C raw-data config user.name  "github-actions[bot]"
+
+          # Sparse-Checkout nur für die *konkreten* neuen RAW-Dateien
+          git -C raw-data sparse-checkout init --no-cone
+          $target = Join-Path $env:GITHUB_WORKSPACE 'raw-data\.git\info\sparse-checkout'
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'sparse.txt') $target -Force
+
+          # Arbeitsbaum befüllen (für neue RAW-Dateien gibt es remote noch nichts → kein Blob-Download)
+          git -C raw-data checkout
+
+      - name: Create feature branch, copy RAW, commit & push (based on raw-data)
+        id: push_raw
+        if: ${{ steps.prep.outputs.paths_count != '0' }}
+        shell: pwsh
+        run: |
+          $ts = "${{ steps.prep.outputs.ts }}"
+          $branch = "raw/${{ github.run_id }}-$ts"
+
+          # Branch vom raw-data-Head
+          git -C raw-data switch -c $branch
+
+          # RAW-Dateien rüberkopieren (nur die neuen dieses Runs)
+          $srcRaw = Join-Path $env:GITHUB_WORKSPACE 'raw'
+          if (Test-Path $srcRaw) {
+            $dstRaw = Join-Path $env:GITHUB_WORKSPACE 'raw-data\raw'
+            New-Item -ItemType Directory -Path $dstRaw -Force | Out-Null
+            robocopy $srcRaw $dstRaw /E /NFL /NDL /NJH /NJS /NC /NS /XO | Out-Null
+            if ($LASTEXITCODE -ge 8) { Write-Error "Robocopy (RAW) failed with code $LASTEXITCODE"; exit $LASTEXITCODE }
+          }
+
+          Push-Location raw-data
+          git add -A
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "No RAW JSONs to commit - branch will not be created."
-            # optionally switch back to main
-            git switch ${{ github.ref_name }}
+            Write-Host "No changes to commit for raw-data."
+            "branch_created=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Pop-Location
             exit 0
           }
 
           $msg = "RAW JSONs via GitHub Actions ${{ github.run_id }}"
           git commit -m "$msg"
-          git push origin HEAD:$rawBranch
-
-          # Optional: Switch back to main
-          git switch ${{ github.ref_name }}
+          git push origin HEAD
+          Pop-Location
 
           "branch_created=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "branch_name=$rawBranch" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "branch_name=$branch" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Create Pull Request for RAW data
-        id: create_pr
-        if: success() && steps.create_raw_branch.outputs.branch_created == 'true'
+      - name: Create PR for RAW data (base: raw-data) & enable auto-merge
+        if: success() && steps.push_raw.outputs.branch_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RAW_BRANCH: ${{ steps.create_raw_branch.outputs.branch_name }}
         shell: pwsh
         run: |
-          $pr_title = "RAW Data Update from Run ${{ github.run_id }}"
-          $pr_body = "This PR contains the raw JSON data from workflow run ${{ github.run_id }}."
-          $pr_url = gh pr create --base raw-data --head $env:RAW_BRANCH --title $pr_title --body $pr_body
-          echo "pr_url=$pr_url" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Enable Auto-Merge for RAW data PR
-        if: success() && steps.create_pr.outputs.pr_url
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ steps.create_pr.outputs.pr_url }}
-        shell: pwsh
-        run: |
-          gh pr merge $env:PR_URL --admin --merge --delete-branch
+          $head = "${{ steps.push_raw.outputs.branch_name }}"
+          $pr_title = "RAW Data Update ${{ steps.prep.outputs.ts }} (run_id=${{ github.run_id }})"
+          $pr_body  = "Adds new RAW JSONs only (no CSVs). Partial + sparse clone keeps PR minimal."
+          $pr_url = gh pr create --base raw-data --head $head --title $pr_title --body $pr_body
+          # Serverseitiges Auto-Merge → reduziert 504-Risiko
+          gh pr merge $pr_url --merge --auto --delete-branch
